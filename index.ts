@@ -6,11 +6,30 @@ import crypto from "crypto"
 const app = express()
 const server = http.createServer(app)
 
+const allowedOrigins = [
+  "http://localhost:3000",
+  "https://xpzones.in",
+  "https://www.xpzones.in",
+  "https://xpzone.vercel.app"
+]
+
 const io = new Server(server, {
   cors: {
-    origin: "https://xpzones.in",
-    methods: ["GET", "POST"]
-  }
+    origin: allowedOrigins,
+    methods: ["GET", "POST"],
+    credentials: true
+  },
+  transports: ["polling", "websocket"],
+  allowEIO3: true
+})
+
+// Health check endpoint
+app.get("/", (req, res) => {
+  res.json({ status: "ok", message: "Socket.IO server running" })
+})
+
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", connections: io.engine.clientsCount })
 })
 
 interface PlayerMMR {
