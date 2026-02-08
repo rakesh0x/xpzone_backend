@@ -19,8 +19,10 @@ const io = new Server(server, {
     methods: ["GET", "POST"],
     credentials: true
   },
-  transports: ["polling", "websocket"],
-  allowEIO3: true
+  transports: ["websocket", "polling"], // Prioritize websocket
+  pingInterval: 25000,
+  pingTimeout: 60000,
+  connectTimeout: 20000
 })
 
 // Health check endpoint
@@ -109,10 +111,19 @@ io.on("connection", (socket) => {
       sessions.set(sessionId, session)
     }
 
-    // If session was already in a team, rejoin the room
+    // If session was already in a team, rejoin the room and sync state
     if (session.teamId) {
       socket.join(session.teamId)
-      console.log(`Socket ${socket.id} auto-rejoined room ${session.teamId}`)
+      //      console.log(`Socket ${socket.id} auto-rejoined room ${session.teamId}`)
+
+      const draftState = draftStates.get(session.teamId)
+      if (draftState) {
+        socket.emit("draft-state-sync", {
+          ...draftState,
+          playerSides: Object.fromEntries(draftState.playerSides),
+          playerMMRs: Object.fromEntries(draftState.playerMMRs),
+        })
+      }
     }
   }
 
@@ -145,7 +156,7 @@ io.on("connection", (socket) => {
 
     if (session.teamId) {
       socket.join(session.teamId)
-      console.log(`Session restored for ${sId} in team ${session.teamId}`)
+      //      console.log(`Session restored for ${sId} in team ${session.teamId}`)
 
       // Send current state
       const draftState = draftStates.get(session.teamId)
@@ -457,7 +468,7 @@ io.on("connection", (socket) => {
   })
 
   socket.on("disconnect", () => {
-    console.log(`User disconnected: ${socket.id} (Session: ${sessionId})`)
+    //    console.log(`User disconnected: ${socket.id} (Session: ${sessionId})`)
 
     if (!sessionId) return
 
