@@ -64,6 +64,12 @@ interface DraftState {
   pickOrder: string[] // Order of socket IDs for picking
   // Room code set by blue leader after draft
   roomCode?: string
+  // Post-game voting
+  gameStartTime: number | null
+  votingActive: boolean
+  votes: Map<string, "blue" | "red">
+  votingEndTime: number | null
+  winner: "blue" | "red" | "draw" | null
 }
 
 const teams: any[] = []
@@ -77,6 +83,7 @@ interface Session {
   playerName: string | null
   playerMMR: number | null
   side: "blue" | "red" | null
+  socketCount: number
 }
 
 const sessions = new Map<string, Session>()
@@ -99,6 +106,7 @@ io.on("connection", (socket) => {
     let session = sessions.get(sessionId)
     if (session) {
       session.socketId = socket.id
+      session.socketCount++
     } else {
       session = {
         sessionId,
@@ -106,7 +114,8 @@ io.on("connection", (socket) => {
         teamId: null,
         playerName: null,
         playerMMR: null,
-        side: null
+        side: null,
+        socketCount: 1
       }
       sessions.set(sessionId, session)
     }
@@ -129,6 +138,12 @@ io.on("connection", (socket) => {
 
   socket.join("lobby")
   socket.emit("teams-sync", teams)
+  console.log(`Initial teams-sync sent to ${socket.id}. Current teams: ${teams.length}`)
+
+  socket.on("get-teams", () => {
+    socket.emit("teams-sync", teams)
+    console.log(`Manual teams-sync requested by ${socket.id}. Current teams: ${teams.length}`)
+  })
 
   // Explicit session restoration from client
   socket.on("restore-session", (data) => {
@@ -143,11 +158,13 @@ io.on("connection", (socket) => {
         teamId,
         side,
         playerName,
-        playerMMR
+        playerMMR,
+        socketCount: 1
       }
       sessions.set(sId, session)
     } else {
       session.socketId = socket.id
+      session.socketCount++
       if (teamId) session.teamId = teamId
       if (side) session.side = side
       if (playerName) session.playerName = playerName
@@ -205,7 +222,13 @@ io.on("connection", (socket) => {
       redBanCount: 0,
       minPlayersPerTeam: team.mode === "5v5" ? 5 : team.mode === "10v10" ? 10 : 5,
       currentPickerIndex: { blue: 0, red: 0 },
-      pickOrder: []
+      pickOrder: [],
+      // Voting fields
+      gameStartTime: null,
+      votingActive: false,
+      votes: new Map(),
+      votingEndTime: null,
+      winner: null
     })
 
     socket.join(team.id)
@@ -389,6 +412,54 @@ io.on("connection", (socket) => {
       const team = teams.find(t => t.id === teamId)
       if (team) team.status = "live"
       io.to("lobby").emit("teams-sync", teams)
+
+      // Start the 20-minute game timer for voting
+      draftState.gameStartTime = Date.now()
+      const GAME_DURATION = 20 * 60 * 1000 // 20 minutes
+      const VOTING_DURATION = 60 * 1000 // 60 seconds for voting
+
+      setTimeout(() => {
+        const ds = draftStates.get(teamId)
+        if (ds && !ds.votingActive && !ds.winner) {
+          ds.votingActive = true
+          ds.votingEndTime = Date.now() + VOTING_DURATION
+          io.to(teamId).emit("voting-started", {
+            endTime: ds.votingEndTime,
+            duration: VOTING_DURATION
+          })
+
+          // End voting after VOTING_DURATION
+          setTimeout(() => {
+            const finalDs = draftStates.get(teamId)
+            if (finalDs && finalDs.votingActive) {
+              finalDs.votingActive = false
+
+              // Count votes
+              let blueVotes = 0
+              let redVotes = 0
+              finalDs.votes.forEach((vote) => {
+                if (vote === "blue") blueVotes++
+                else if (vote === "red") redVotes++
+              })
+
+              if (blueVotes > redVotes) finalDs.winner = "blue"
+              else if (redVotes > blueVotes) finalDs.winner = "red"
+              else finalDs.winner = "draw"
+
+              io.to(teamId).emit("voting-ended", {
+                winner: finalDs.winner,
+                blueVotes,
+                redVotes
+              })
+
+              // Update team status
+              const t = teams.find(t => t.id === teamId)
+              if (t) t.status = "finished"
+              io.to("lobby").emit("teams-sync", teams)
+            }
+          }, VOTING_DURATION)
+        }
+      }, GAME_DURATION)
     }
 
     io.to(teamId).emit("draft-pick-made", {
@@ -467,18 +538,64 @@ io.on("connection", (socket) => {
     })
   })
 
-  socket.on("disconnect", () => {
-    //    console.log(`User disconnected: ${socket.id} (Session: ${sessionId})`)
+  // Handle post-game voting
+  socket.on("submit-vote", (data: { teamId: string, vote: "blue" | "red" }) => {
+    const { teamId, vote } = data
+    const draftState = draftStates.get(teamId)
 
+    if (!draftState || !draftState.votingActive) {
+      socket.emit("vote-failed", { reason: "Voting is not active" })
+      return
+    }
+
+    // Check if player is part of this game
+    const playerSide = draftState.playerSides.get(sessionId)
+    if (!playerSide) {
+      socket.emit("vote-failed", { reason: "You are not part of this game" })
+      return
+    }
+
+    // Register the vote (overwrites any previous vote)
+    draftState.votes.set(sessionId, vote)
+
+    // Count current votes
+    let blueVotes = 0
+    let redVotes = 0
+    draftState.votes.forEach((v) => {
+      if (v === "blue") blueVotes++
+      else if (v === "red") redVotes++
+    })
+
+    // Broadcast updated vote counts
+    io.to(teamId).emit("vote-update", {
+      blueVotes,
+      redVotes,
+      totalVoters: draftState.bluePlayers.length + draftState.redPlayers.length,
+      votedCount: draftState.votes.size
+    })
+
+    socket.emit("vote-success", { vote })
+  })
+
+  socket.on("disconnect", () => {
     if (!sessionId) return
+
+    const session = sessions.get(sessionId)
+    if (session) {
+      session.socketCount--
+      if (session.socketCount > 0) {
+        console.log(`Socket disconnected for ${sessionId}, but ${session.socketCount} tabs still open. No cleanup scheduled.`)
+        return
+      }
+    }
 
     // Set a timeout to clean up the session if they don't reconnect
     const timeout = setTimeout(() => {
       console.log(`Cleaning up session after grace period: ${sessionId}`)
 
-      const session = sessions.get(sessionId)
-      if (session && session.teamId) {
-        const teamId = session.teamId
+      const s = sessions.get(sessionId)
+      if (s && s.teamId) {
+        const teamId = s.teamId
         const team = teams.find(t => t.id === teamId)
         if (team) {
           team.members = team.members.filter((id: string) => id !== sessionId)
