@@ -19,7 +19,7 @@ const io = new Server(server, {
     methods: ["GET", "POST"],
     credentials: true
   },
-  transports: ["websocket", "polling"], // Prioritize websocket
+  transports: ["polling", "websocket"], // Start with polling, upgrade to websocket
   pingInterval: 25000,
   pingTimeout: 60000,
   connectTimeout: 20000
@@ -690,6 +690,14 @@ io.on("connection", (socket) => {
   })
 })
 
-server.listen(4000, () => {
-  console.log("Server listening on 4000")
-})
+const PORT = process.env.PORT ? Number(process.env.PORT) : 4000
+
+server.listen(
+  {
+    port: Number(PORT),
+    host: "0.0.0.0",
+  },
+  () => {
+    console.log(`Server listening on ${PORT}`)
+  }
+)
