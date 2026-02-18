@@ -34,6 +34,15 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", connections: io.engine.clientsCount })
 })
 
+app.get("/debug/state", (req, res) => {
+  res.json({
+    teams: teams,
+    sessions: Array.from(sessions.entries()),
+    disconnectTimeouts: Array.from(disconnectTimeouts.keys()),
+    clientsCount: io.engine.clientsCount
+  })
+})
+
 interface PlayerMMR {
   socketId: string
   name: string
@@ -95,7 +104,9 @@ function removePlayerFromTeam(sessionId: string, teamId: string) {
   const team = teams.find(t => t.id === teamId)
   if (!team) return
 
+  console.log(`Removing player ${sessionId} from team ${teamId}. Current members before: ${team.members.length}`)
   team.members = team.members.filter((id: string) => id !== sessionId)
+  console.log(`Members after filter: ${team.members.length}`)
 
   const draftState = draftStates.get(teamId)
   if (draftState) {
@@ -128,9 +139,14 @@ function removePlayerFromTeam(sessionId: string, teamId: string) {
   }
 
   if (team.members.length === 0) {
-    teams.splice(teams.indexOf(team), 1)
-    draftStates.delete(teamId)
-    console.log(`Team removed: ${teamId}`)
+    const index = teams.indexOf(team)
+    if (index > -1) {
+      teams.splice(index, 1)
+      draftStates.delete(teamId)
+      console.log(`Team removed (empty): ${teamId}`)
+    }
+  } else {
+    console.log(`Team ${teamId} still has ${team.members.length} members: ${team.members.join(", ")}`)
   }
   io.to("lobby").emit("teams-sync", teams)
 }
