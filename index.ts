@@ -97,7 +97,7 @@ interface Session {
 
 const sessions = new Map<string, Session>()
 const disconnectTimeouts = new Map<string, NodeJS.Timeout>()
-const GRACE_PERIOD = 5000 // 5 seconds
+const GRACE_PERIOD = 1000 // 1 second
 
 // Reusable helper to remove a player from a team and clean up state
 function removePlayerFromTeam(sessionId: string, teamId: string) {
