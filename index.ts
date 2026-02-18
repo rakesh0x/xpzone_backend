@@ -19,10 +19,10 @@ const io = new Server(server, {
     methods: ["GET", "POST"],
     credentials: true
   },
-  transports: ["websocket", "polling"], // Prefer websocket for instant delivery, fall back to polling
-  pingInterval: 25000,
-  pingTimeout: 60000,
-  connectTimeout: 20000
+  transports: ["websocket", "polling"],
+  pingInterval: 5000,   // Check every 5s
+  pingTimeout: 5000,    // Timeout after 5s of no response
+  connectTimeout: 10000
 })
 
 // Health check endpoint
@@ -168,6 +168,7 @@ io.on("connection", (socket) => {
     if (session) {
       session.socketId = socket.id
       session.socketCount++
+      console.log(`Session updated: ${sessionId}. Active sockets: ${session.socketCount}`)
     } else {
       session = {
         sessionId,
@@ -179,6 +180,7 @@ io.on("connection", (socket) => {
         socketCount: 1
       }
       sessions.set(sessionId, session)
+      console.log(`New session created: ${sessionId}. Active sockets: 1`)
     }
 
     // If session was already in a team, rejoin the room and sync state
@@ -225,7 +227,6 @@ io.on("connection", (socket) => {
       sessions.set(sId, session)
     } else {
       session.socketId = socket.id
-      session.socketCount++
       if (teamId) session.teamId = teamId
       if (side) session.side = side
       if (playerName) session.playerName = playerName
