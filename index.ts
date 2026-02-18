@@ -19,7 +19,7 @@ const io = new Server(server, {
     methods: ["GET", "POST"],
     credentials: true
   },
-  transports: ["polling", "websocket"], // Start with polling, upgrade to websocket
+  transports: ["websocket", "polling"], // Prefer websocket for instant delivery, fall back to polling
   pingInterval: 25000,
   pingTimeout: 60000,
   connectTimeout: 20000
@@ -89,6 +89,51 @@ interface Session {
 const sessions = new Map<string, Session>()
 const disconnectTimeouts = new Map<string, NodeJS.Timeout>()
 const GRACE_PERIOD = 5000 // 5 seconds
+
+// Reusable helper to remove a player from a team and clean up state
+function removePlayerFromTeam(sessionId: string, teamId: string) {
+  const team = teams.find(t => t.id === teamId)
+  if (!team) return
+
+  team.members = team.members.filter((id: string) => id !== sessionId)
+
+  const draftState = draftStates.get(teamId)
+  if (draftState) {
+    draftState.bluePlayers = draftState.bluePlayers.filter((id: string) => id !== sessionId)
+    draftState.redPlayers = draftState.redPlayers.filter((id: string) => id !== sessionId)
+    draftState.playerSides.delete(sessionId)
+    draftState.playerMMRs.delete(sessionId)
+
+    // Re-calc leaders if the disconnected player was a leader
+    if (sessionId === draftState.blueLeader || sessionId === draftState.redLeader) {
+      const blueLeaders = Array.from(draftState.playerMMRs.entries())
+        .filter(([pId]) => draftState.bluePlayers.includes(pId))
+        .sort((a, b) => b[1].mmr - a[1].mmr)
+      draftState.blueLeader = blueLeaders[0]?.[0] || null
+
+      const redLeaders = Array.from(draftState.playerMMRs.entries())
+        .filter(([pId]) => draftState.redPlayers.includes(pId))
+        .sort((a, b) => b[1].mmr - a[1].mmr)
+      draftState.redLeader = redLeaders[0]?.[0] || null
+    }
+
+    io.to(teamId).emit("player-disconnected", {
+      playerId: sessionId,
+      bluePlayers: draftState.bluePlayers,
+      redPlayers: draftState.redPlayers,
+      playerMMRs: Object.fromEntries(draftState.playerMMRs),
+      blueLeader: draftState.blueLeader,
+      redLeader: draftState.redLeader
+    })
+  }
+
+  if (team.members.length === 0) {
+    teams.splice(teams.indexOf(team), 1)
+    draftStates.delete(teamId)
+    console.log(`Team removed: ${teamId}`)
+  }
+  io.to("lobby").emit("teams-sync", teams)
+}
 
 io.on("connection", (socket) => {
   const sessionId = socket.handshake.auth.sessionId
@@ -577,6 +622,19 @@ io.on("connection", (socket) => {
     socket.emit("vote-success", { vote })
   })
 
+  // Explicit leave-team event (immediate removal, no grace period)
+  socket.on("leave-team", (data: { teamId: string }) => {
+    const { teamId } = data
+    console.log(`Player ${sessionId} explicitly leaving team ${teamId}`)
+    removePlayerFromTeam(sessionId, teamId)
+
+    const session = sessions.get(sessionId)
+    if (session) {
+      session.teamId = null
+      session.side = null
+    }
+  })
+
   socket.on("disconnect", () => {
     if (!sessionId) return
 
@@ -589,57 +647,15 @@ io.on("connection", (socket) => {
       }
     }
 
+    console.log(`All sockets closed for session ${sessionId}. Starting ${GRACE_PERIOD}ms grace period...`)
+
     // Set a timeout to clean up the session if they don't reconnect
     const timeout = setTimeout(() => {
       console.log(`Cleaning up session after grace period: ${sessionId}`)
 
       const s = sessions.get(sessionId)
       if (s && s.teamId) {
-        const teamId = s.teamId
-        const team = teams.find(t => t.id === teamId)
-        if (team) {
-          team.members = team.members.filter((id: string) => id !== sessionId)
-
-          const draftState = draftStates.get(teamId)
-          if (draftState) {
-            const wasInBlue = draftState.bluePlayers.includes(sessionId)
-            const wasInRed = draftState.redPlayers.includes(sessionId)
-
-            draftState.bluePlayers = draftState.bluePlayers.filter((id: string) => id !== sessionId)
-            draftState.redPlayers = draftState.redPlayers.filter((id: string) => id !== sessionId)
-            draftState.playerSides.delete(sessionId)
-            draftState.playerMMRs.delete(sessionId)
-
-            // Re-calc leaders
-            if (sessionId === draftState.blueLeader || sessionId === draftState.redLeader) {
-              const blueLeaders = Array.from(draftState.playerMMRs.entries())
-                .filter(([pId]) => draftState.bluePlayers.includes(pId))
-                .sort((a, b) => b[1].mmr - a[1].mmr)
-              draftState.blueLeader = blueLeaders[0]?.[0] || null
-
-              const redLeaders = Array.from(draftState.playerMMRs.entries())
-                .filter(([pId]) => draftState.redPlayers.includes(pId))
-                .sort((a, b) => b[1].mmr - a[1].mmr)
-              draftState.redLeader = redLeaders[0]?.[0] || null
-            }
-
-            io.to(teamId).emit("player-disconnected", {
-              playerId: sessionId,
-              bluePlayers: draftState.bluePlayers,
-              redPlayers: draftState.redPlayers,
-              playerMMRs: Object.fromEntries(draftState.playerMMRs),
-              blueLeader: draftState.blueLeader,
-              redLeader: draftState.redLeader
-            })
-          }
-
-          if (team.members.length === 0) {
-            teams.splice(teams.indexOf(team), 1)
-            draftStates.delete(teamId)
-            console.log(`Team removed: ${teamId}`)
-          }
-          io.to("lobby").emit("teams-sync", teams)
-        }
+        removePlayerFromTeam(sessionId, s.teamId)
       }
       sessions.delete(sessionId)
       disconnectTimeouts.delete(sessionId)
